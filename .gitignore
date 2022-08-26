@@ -1,0 +1,11 @@
+# CMake
+build/
+# CLion + QtCreator
+build*/
+cmake-build-*/
+*.user
+.idea/
+*.iml
+# VS
+.vs/
+CMakeSettings.json
