@@ -15,8 +15,11 @@ include_directories( ${GST_INCLUDE_DIRS}  )
 
 
 # OpenCV ${OpenCV_LIBS}, used for some examples
-#find_package(OpenCV REQUIRED)
-#include_directories(${OpenCV_INCLUDE_DIRS})
+find_package(OpenCV REQUIRED)
+include_directories(${OpenCV_INCLUDE_DIRS})
 
 add_executable(fun1 fun1.cpp)
 target_link_libraries(fun1 ${GST_LIBRARIES})
+
+add_executable(fun2 fun2.cpp)
+target_link_libraries(fun2 ${GST_LIBRARIES})

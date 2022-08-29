@@ -66,11 +66,11 @@ int main(int argc, char **argv) {
     gst_object_unref(bus);
 
     // The general unref rule is like this:
-    // If you don't need banana, write
-    // gst_banana_unref(banana);
+    // If you don't need myBanana anymore, write
+    // gst_banana_unref(myBanana);
     // If no such function, try
-    // gst_object_unref(banana);
-    // If the code does not work, it means that you shouldn't unref banana
+    // gst_object_unref(myBanana);
+    // If the code does not work, it means that you shouldn't unref myBanana
 
     // Stop and free the pipeline
     gst_element_set_state(pipeline, GST_STATE_NULL);
