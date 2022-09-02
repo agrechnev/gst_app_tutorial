@@ -1,4 +1,5 @@
-/// FUN 2 : Creating pipeline by hand, message processing
+/// CAPINFO : Information on pads, caps and elements, otherwise similar to FUN2
+/// See our funny diagnostics in the modified busProcessMsg()
 
 #include <iostream>
 #include <string>
@@ -27,8 +28,12 @@ inline void checkErr(GError *err) {
 }
 
 //======================================================================================================================
+void diagnose(GstElement *element);
+
 /// Process a single bus message, log messages, exit on error, return false on eof
-static bool busProcessMsg(GstElement *pipeline, GstMessage *msg, const std::string &prefix) {
+/// This is a MODIFIED version, we run diagnose in here !
+/// Diagnose would not give much info before we actually start playing the pipeline (PAUSED is enough)
+static bool busProcessMsg(GstElement *pipeline, GstMessage *msg, const std::string &prefix, GstElement *elemToDiagnose) {
     using namespace std;
 
     GstMessageType mType = GST_MESSAGE_TYPE(msg);
@@ -56,6 +61,7 @@ static bool busProcessMsg(GstElement *pipeline, GstMessage *msg, const std::stri
                 gst_message_parse_state_changed(msg, &sOld, &sNew, &sPenging);
                 cout << "Pipeline changed from " << gst_element_state_get_name(sOld) << " to " <<
                      gst_element_state_get_name(sNew) << endl;
+                diagnose(elemToDiagnose);
             }
             break;
         case (GST_MESSAGE_STEP_START):
@@ -77,9 +83,64 @@ static bool busProcessMsg(GstElement *pipeline, GstMessage *msg, const std::stri
 }
 
 //======================================================================================================================
+// A few useful routines for diagnostics
+
+static gboolean printField(GQuark field, const GValue *value, gpointer pfx) {
+    using namespace std;
+    gchar *str = gst_value_serialize(value);
+    cout << (char *) pfx << " " << g_quark_to_string(field) << " " << str << endl;
+    g_free(str);
+    return TRUE;
+}
+
+void printCaps(const GstCaps *caps, const std::string &pfx) {
+    using namespace std;
+    if (caps == nullptr)
+        return;
+    if (gst_caps_is_any(caps))
+        cout << pfx << "ANY" << endl;
+    else if (gst_caps_is_empty(caps))
+        cout << pfx << "EMPTY" << endl;
+    for (int i = 0; i < gst_caps_get_size(caps); ++i) {
+        GstStructure *s = gst_caps_get_structure(caps, i);
+        cout << pfx << gst_structure_get_name(s) << endl;
+        gst_structure_foreach(s, &printField, (gpointer) pfx.c_str());
+    }
+}
+
+
+void printPadsCB(const GValue * item, gpointer userData) {
+    using namespace std;
+    GstElement *element = (GstElement *)userData;
+    GstPad *pad = (GstPad *)g_value_get_object(item);
+    myAssert(pad);
+    cout << "PAD : " << gst_pad_get_name(pad) << endl;
+    GstCaps *caps = gst_pad_get_current_caps(pad);
+    char * str = gst_caps_to_string(caps);
+    cout << str << endl;
+    free(str);
+}
+
+void printPads(GstElement *element) {
+    using namespace std;
+    GstIterator *pad_iter = gst_element_iterate_pads(element);
+    gst_iterator_foreach(pad_iter, printPadsCB, element);
+    gst_iterator_free(pad_iter);
+
+}
+void diagnose(GstElement *element) {
+    using namespace std;
+    cout << "=====================================" << endl;
+    cout << "DIAGNOSE element : " << gst_element_get_name(element) << endl;
+    printPads(element);
+    cout << "=====================================" << endl;
+}
+
+
+//======================================================================================================================
 int main(int argc, char **argv) {
     using namespace std;
-    cout << "GST FUN 2 : Creating pipeline by hand, message processing" << endl;
+    cout << "GST CAPINFO : Information on pads, caps and elements" << endl;
 
     // Init gstreamer
     cout << "argc before = " << argc << endl;
@@ -103,9 +164,6 @@ int main(int argc, char **argv) {
     gst_bin_add_many(GST_BIN(pipeline), src, conv, sink, nullptr);
     MY_ASSERT(gst_element_link_many(src, conv, sink, nullptr));
 
-    // Note: In this tutorial we don't cover linking dynamic and request pads
-    // See the official GStreamer tutorial !
-
     // Play the pipeline
     MY_ASSERT(gst_element_set_state(pipeline, GST_STATE_PLAYING));
 
@@ -114,7 +172,7 @@ int main(int argc, char **argv) {
     for (;;) {
         // Wait for message, no filtering, any message goes
         GstMessage *msg = gst_bus_timed_pop(bus, GST_CLOCK_TIME_NONE);
-        bool res = busProcessMsg(pipeline, msg, "GOBLIN");
+        bool res = busProcessMsg(pipeline, msg, "GOBLIN", conv);
         gst_message_unref(msg);
         if (!res)
             break;

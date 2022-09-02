@@ -23,3 +23,6 @@ target_link_libraries(fun1 ${GST_LIBRARIES})
 
 add_executable(fun2 fun2.cpp)
 target_link_libraries(fun2 ${GST_LIBRARIES})
+
+add_executable(capinfo capinfo.cpp)
+target_link_libraries(capinfo ${GST_LIBRARIES})
