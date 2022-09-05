@@ -6,15 +6,11 @@
 #include <gst/gst.h>
 
 //======================================================================================================================
-/// A simple assertion function
-/// Never use C++ assert statement, the whole line will be removed in Release builds !
+/// A simple assertion function + macro
 inline void myAssert(bool b, const std::string &s = "MYASSERT ERROR !") {
     if (!b)
         throw std::runtime_error(s);
 }
-
-/// And the macro version, requires true or anything non-zero (converted to bool true) to pass
-/// This is similar to CV_Assert() of OPenCV
 #define MY_ASSERT(x) myAssert(x, "MYASSERT ERROR :" #x)
 
 //======================================================================================================================
