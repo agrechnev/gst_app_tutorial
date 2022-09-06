@@ -29,3 +29,6 @@ target_link_libraries(capinfo ${GST_LIBRARIES})
 
 add_executable(video1 video1.cpp)
 target_link_libraries(video1 ${GST_LIBRARIES} ${OpenCV_LIBS})
+
+add_executable(video2 video2.cpp)
+target_link_libraries(video2 ${GST_LIBRARIES} ${OpenCV_LIBS})

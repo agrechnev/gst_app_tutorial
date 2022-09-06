@@ -1,13 +1,16 @@
-// Created by IT-JIM
-// VIDEO1 : Send video to appsink, display with cv::imshow()
+//
+// Created by IT-JIM 
+// VIDEO2: Decode a video file with opencv and send to a gstreamer pipeline via appsrc
 
 #include <iostream>
 #include <string>
 #include <thread>
+#include <atomic>
+#include <cmath>
+#include <sstream>
 
 #include <gst/gst.h>
-#include <gst/app/gstappsink.h>
-
+#include <gst/app/gstappsrc.h>
 
 #include <opencv2/opencv.hpp>
 
@@ -32,8 +35,15 @@ inline void checkErr(GError *err) {
 //======================================================================================================================
 /// Our global data, serious gstreamer apps should always have this !
 struct GoblinData {
+    /// pipeline
     GstElement *pipeline = nullptr;
-    GstElement *sinkVideo = nullptr;
+    /// appsrc
+    GstElement *srcVideo = nullptr;
+    /// Video file name
+    std::string fileName;
+    /// Appsrc flag: when it's true, send the frames
+    std::atomic_bool flagRunV{false};
+
 };
 
 //======================================================================================================================
@@ -106,104 +116,140 @@ void codeThreadBus(GstElement *pipeline, GoblinData &data, const std::string &pr
 }
 
 //======================================================================================================================
-/// Appsink process thread
-void codeThreadProcessV(GoblinData &data) {
+/// Read a video file with opencv and send data to appsrc
+void codeThreadSrcV(GoblinData &data) {
     using namespace std;
+    using namespace cv;
+
+    // Open the video file with opencv
+    VideoCapture video(data.fileName);
+    MY_ASSERT(video.isOpened());
+
+    // Find width, height, FPS
+    int imW = (int) video.get(CAP_PROP_FRAME_WIDTH);
+    int imH = (int) video.get(CAP_PROP_FRAME_HEIGHT);
+    double fps = video.get(CAP_PROP_FPS);
+    MY_ASSERT(imW > 0 && imH > 0 && fps > 0);
+
+    // Now, we must give our apprsc proper caps (with width+height) and re-negotiate !
+    // Otherwise, the pipeline will not work !
+    ostringstream oss;
+    oss << "video/x-raw,format=BGR,width=" << imW << ",height=" << imH << ",framerate=" << int(lround(fps)) << "/1";
+    cout << "CAPS=" << oss.str() << endl;
+    GstCaps *capsVideo = gst_caps_from_string(oss.str().c_str());
+    g_object_set(data.srcVideo, "caps", capsVideo, nullptr);
+    gst_caps_unref(capsVideo);
+
+    // Play the pipeline AFTER we have set up the final caps
+    MY_ASSERT(gst_element_set_state(data.pipeline, GST_STATE_PLAYING));
+
+    // Frame loop
+    int frameCount = 0;
+    Mat frame;
     for (;;) {
-        // Exit on EOS
-        if (gst_app_sink_is_eos(GST_APP_SINK(data.sinkVideo))) {
-            cout << "EOS !" << endl;
-            break;
+        // If the flag is false, go idle and wait, the pipeline does not want data for now
+        if (!data.flagRunV) {
+            cout << "(wait)" << endl;
+            this_thread::sleep_for(chrono::milliseconds(10));
+            continue;
         }
 
-        // Pull the sample (synchronous, wait)
-        GstSample *sample = gst_app_sink_pull_sample(GST_APP_SINK(data.sinkVideo));
-        if (sample == nullptr) {
-            cout << "NO sample !" << endl;
+        // Read a frame from the video
+        video.read(frame);
+        if (frame.empty())
             break;
-        }
 
-        // Get width and height from sample caps (NOT element caps)
-        GstCaps *caps = gst_sample_get_caps(sample);
-        MY_ASSERT(caps != nullptr);
-        GstStructure *s = gst_caps_get_structure(caps, 0);
-        int imW, imH;
-        MY_ASSERT(gst_structure_get_int(s, "width", &imW));
-        MY_ASSERT(gst_structure_get_int(s, "height", &imH));
-        cout << "Sample: W = " << imW << ", H = " << imH << endl;
-
-//        cout << "sample !" << endl;
-        // Process the sample
-        // "buffer" and "map" are used to access raw data in the sample
-        // "buffer" is a single data chunk, for raw video it's 1 frame
-        // "buffer" is NOT a queue !
-        // "Map" is the helper to access raw data in the buffer
-        GstBuffer *buffer = gst_sample_get_buffer(sample);
+        // Create a GStreamer buffer and copy data to it via a map
+        int bufferSize = frame.cols * frame.rows * 3;
+        GstBuffer *buffer = gst_buffer_new_and_alloc(bufferSize);
         GstMapInfo m;
-        MY_ASSERT(gst_buffer_map(buffer, &m, GST_MAP_READ));
-        MY_ASSERT(m.size == imW * imH * 3);
-//        cout << "size = " << map.size << " ==? " << imW*imH*3 << endl;
-
-        // Wrap the raw data in OpenCV frame and show on screen
-        cv::Mat frame(imH, imW, CV_8UC3, (void *) m.data);
-        cv::imshow("frame", frame);
-        int key = cv::waitKey(1);
-
-        // Don't forget to unmap the buffer and unref the sample
+        gst_buffer_map(buffer, &m, GST_MAP_WRITE);
+        memcpy(m.data, frame.data, bufferSize);
         gst_buffer_unmap(buffer, &m);
-        gst_sample_unref(sample);
-        if (27 == key)
-            exit(0);
+
+        // Set up timestamp
+        // This is not strictly required, but you need it for the correct 1x playback with sync=1 !
+        buffer->pts = uint64_t(frameCount  / fps * GST_SECOND);
+
+        // Send buffer to gstreamer
+        GstFlowReturn ret = gst_app_src_push_buffer(GST_APP_SRC(data.srcVideo), buffer);
+
+        ++frameCount;
+    }
+
+    // Signal EOF to the pipeline
+    gst_app_src_end_of_stream(GST_APP_SRC(data.srcVideo));
+}
+
+//======================================================================================================================
+/// Callback called when the pipeline wants more data
+static void startFeed(GstElement *source, guint size, GoblinData *data) {
+    using namespace std;
+    if (!data->flagRunV) {
+        cout << "startFeed !" << endl;
+        data->flagRunV = true;
+    }
+}
+
+//======================================================================================================================
+/// Callback called when the pipeline wants no more data for now
+static void stopFeed(GstElement *source, GoblinData *data) {
+    using namespace std;
+    if (data->flagRunV) {
+        cout << "stopFeed !" << endl;
+        data->flagRunV = false;
     }
 }
 
 //======================================================================================================================
 int main(int argc, char **argv) {
     using namespace std;
-    cout << "VIDEO1 : Send video to appsink, display with cv::imshow()" << endl;
+    cout << "VIDEO2 : Decode a video file with opencv and send to a gstreamer pipeline via appsrc" << endl;
 
     // Init gstreamer
     gst_init(&argc, &argv);
 
     if (argc != 2) {
-        cout << "Usage:\nvideo1 <video_file>" << endl;
+        cout << "Usage:\nvideo2 <video_file>" << endl;
     }
-    string fileName(argv[1]);
-    cout << "Playing file : " << fileName << endl;
 
     // Our global data
     GoblinData data;
+    data.fileName = argv[1];
+    cout << "Playing file : " << data.fileName << endl;
 
-    // Set up the pipeline
-    // Caps in appsink are important
-    // max-buffers=2 to limit the queue and RAM usage
-    // sync=1 for real-time playback, try sync=0 for fun !
-    string pipeStr = "filesrc location=" + fileName +
-                     " ! decodebin ! videoconvert ! appsink name=mysink max-buffers=2 sync=1 caps=video/x-raw,format=BGR";
+    // Create GSTreamer pipeline
+    // Note: we don't know image size or framerate yet !
+    // We'll give preliminary caps only which we will replace later
+    // format=time is not really needed for video, but audio appsrc will not work without it !
+    string pipeStr = "appsrc name=mysrc format=time caps=video/x-raw,format=BGR ! videoconvert ! autovideosink sync=1";
     GError *err = nullptr;
     data.pipeline = gst_parse_launch(pipeStr.c_str(), &err);
     checkErr(err);
     MY_ASSERT(data.pipeline);
-    // Find our appsink by name
-    data.sinkVideo = gst_bin_get_by_name(GST_BIN (data.pipeline), "mysink");
-    MY_ASSERT(data.sinkVideo);
+    // Find our appsrc by name
+    data.srcVideo = gst_bin_get_by_name(GST_BIN (data.pipeline), "mysrc");
+    MY_ASSERT(data.srcVideo);
+
+    // Important ! We don't want to abuse the appsrc queue
+    // Thus let the pipeline itself signal us when it wants data
+    // This is based on GLib signals
+    g_signal_connect(data.srcVideo, "need-data", G_CALLBACK(startFeed), &data);
+    g_signal_connect(data.srcVideo, "enough-data", G_CALLBACK(stopFeed), &data);
 
     // Start the bus thread
     thread threadBus([&data]() -> void {
-        codeThreadBus(data.pipeline, data, "GOBLIN");
+        codeThreadBus(data.pipeline, data, "ELF");
     });
 
-    // Start the appsink process thread
-    thread threadProcess([&data]() -> void {
-        codeThreadProcessV(data);
+    // Start the appsrc process thread
+    thread threadSrcV([&data]() -> void {
+        codeThreadSrcV(data);
     });
-
-    // Play the pipeline
-    MY_ASSERT(gst_element_set_state(data.pipeline, GST_STATE_PLAYING));
 
     // Wait for threads
     threadBus.join();
-    threadProcess.join();
+    threadSrcV.join();
 
     // Destroy the pipeline
     gst_element_set_state(data.pipeline, GST_STATE_NULL);
