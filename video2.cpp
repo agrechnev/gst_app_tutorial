@@ -211,6 +211,7 @@ int main(int argc, char **argv) {
 
     if (argc != 2) {
         cout << "Usage:\nvideo2 <video_file>" << endl;
+        return 0;
     }
 
     // Our global data

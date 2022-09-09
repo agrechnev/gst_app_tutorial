@@ -167,6 +167,7 @@ int main(int argc, char **argv) {
 
     if (argc != 2) {
         cout << "Usage:\nvideo1 <video_file>" << endl;
+        return 0;
     }
     string fileName(argv[1]);
     cout << "Playing file : " << fileName << endl;
@@ -188,6 +189,9 @@ int main(int argc, char **argv) {
     data.sinkVideo = gst_bin_get_by_name(GST_BIN (data.pipeline), "mysink");
     MY_ASSERT(data.sinkVideo);
 
+    // Play the pipeline
+    MY_ASSERT(gst_element_set_state(data.pipeline, GST_STATE_PLAYING));
+
     // Start the bus thread
     thread threadBus([&data]() -> void {
         codeThreadBus(data.pipeline, data, "GOBLIN");
@@ -197,9 +201,6 @@ int main(int argc, char **argv) {
     thread threadProcess([&data]() -> void {
         codeThreadProcessV(data);
     });
-
-    // Play the pipeline
-    MY_ASSERT(gst_element_set_state(data.pipeline, GST_STATE_PLAYING));
 
     // Wait for threads
     threadBus.join();
