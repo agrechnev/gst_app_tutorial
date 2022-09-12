@@ -1,6 +1,7 @@
 //
 // Created by IT-JIM 
-// VIDEO3: Two pipelines, with custom video processing in the middle, no audio
+// AUDIO1: Two audio pipelines, with custom audio processing in the middle, no video
+// This is very similar to VIDEO3, but for audio
 
 #include <iostream>
 #include <string>
@@ -11,8 +12,6 @@
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
 #include <gst/app/gstappsink.h>
-
-#include <opencv2/opencv.hpp>
 
 
 //======================================================================================================================
@@ -38,12 +37,12 @@ inline void checkErr(GError *err) {
 struct GoblinData {
     // The two pipelines
     GstElement *goblinPipeline = nullptr;
-    GstElement *goblinSinkV = nullptr;
+    GstElement *goblinSinkA = nullptr;
     GstElement *elfPipeline = nullptr;
-    GstElement *elfSrcV = nullptr;
+    GstElement *elfSrcA = nullptr;
 
     /// Appsrc flag: when it's true, send the frames, otherwise wait
-    std::atomic_bool flagRunV{false};
+    std::atomic_bool flagRunA{false};
     /// True if the elf pipeline has initialized and started splaying
     std::atomic_bool flagElfStarted{false};
 };
@@ -118,93 +117,12 @@ void codeThreadBus(GstElement *pipeline, GoblinData &data, const std::string &pr
 }
 
 //======================================================================================================================
-/// Take frames from appsink, process with opencv, send to appsrc
-void codeThreadProcessV(GoblinData &data) {
-    using namespace std;
-    using namespace cv;
-
-    for (;;) {
-        // We wait until ELF wants data, but only if ELF is already started
-        while (data.flagElfStarted && !data.flagRunV) {
-            cout << "(wait)" << endl;
-            this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-
-        // Check for Goblin EOS
-        if (gst_app_sink_is_eos(GST_APP_SINK(data.goblinSinkV))) {
-            cout << "GOBLIN EOS !" << endl;
-            break;
-        }
-
-        // Pull the sample from Goblin appsink
-        GstSample *sample = gst_app_sink_pull_sample(GST_APP_SINK(data.goblinSinkV));
-        if (sample == nullptr) {
-            cout << "NO sample !" << endl;
-            break;
-        }
-
-        // Get width and height from sample caps
-        GstCaps *caps = gst_sample_get_caps(sample);
-        myAssert(caps != nullptr);
-//        printCaps(caps, "");
-
-        GstStructure *s = gst_caps_get_structure(caps, 0);
-        int imW, imH;
-        MY_ASSERT(gst_structure_get_int(s, "width", &imW));
-        MY_ASSERT(gst_structure_get_int(s, "height", &imH));
-        int f1, f2;
-        MY_ASSERT(gst_structure_get_fraction(s, "framerate", &f1, &f2));
-//        cout << "Sample: W = " << imW << ", H = " << imH << ", framerate = " << f1 << " / " << f2 << endl;
-
-        // Check if ELF is initialized
-        if (!data.flagElfStarted) {
-            // Use sample caps verbatim to ELF appsrc and re-negotiate
-            // Make a copy to be safe (probably not needed)
-            GstCaps *capsElf = gst_caps_copy(caps);
-            g_object_set(data.elfSrcV, "caps", capsElf, nullptr);
-            gst_caps_unref(capsElf);
-
-            // Now we can play the ELF pipeline
-            GstStateChangeReturn ret = gst_element_set_state(data.elfPipeline, GST_STATE_PLAYING);
-            MY_ASSERT(ret != GST_STATE_CHANGE_FAILURE);
-            data.flagElfStarted = true;
-        }
-
-        // Copy data from the sample to cv::Mat()
-        GstBuffer *bufferIn = gst_sample_get_buffer(sample);
-        GstMapInfo mapIn;
-        myAssert(gst_buffer_map(bufferIn, &mapIn, GST_MAP_READ));
-        myAssert(mapIn.size == imW * imH * 3);
-        // Don't forget the Timestamp
-        uint64_t pts = bufferIn->pts;
-        // Clone to be safe, we don't want to modify the input buffer
-        Mat frame = Mat(imH, imW, CV_8UC3, (void *) mapIn.data).clone();
-        gst_buffer_unmap(bufferIn, &mapIn);
-
-        // Modify the frame: apply photo negative to the middle 1/9 of the image
-        Mat frameMid(frame, Rect2i(imW/3, imH/3, imW/3, imH/3));
-        bitwise_not(frameMid, frameMid);
-        // Create the output bufer and send it to elfSrc
-        int bufferSize = frame.cols * frame.rows * 3;
-        GstBuffer *bufferOut = gst_buffer_new_and_alloc(bufferSize);
-        GstMapInfo mapOut;
-        gst_buffer_map(bufferOut, &mapOut, GST_MAP_WRITE);
-        memcpy(mapOut.data, frame.data, bufferSize);
-        gst_buffer_unmap(bufferOut, &mapOut);
-        // Copy the input packet timestamp
-        bufferOut->pts = pts;
-        GstFlowReturn ret = gst_app_src_push_buffer(GST_APP_SRC(data.elfSrcV), bufferOut);
-    }
-    // Send EOS to ELF
-    gst_app_src_end_of_stream(GST_APP_SRC(data.elfSrcV));
-}
-//======================================================================================================================
 /// Callback called when the pipeline wants more data
 static void startFeed(GstElement *source, guint size, GoblinData *data) {
     using namespace std;
-    if (!data->flagRunV) {
+    if (!data->flagRunA) {
         cout << "startFeed !" << endl;
-        data->flagRunV = true;
+        data->flagRunA = true;
     }
 }
 
@@ -212,22 +130,87 @@ static void startFeed(GstElement *source, guint size, GoblinData *data) {
 /// Callback called when the pipeline wants no more data for now
 static void stopFeed(GstElement *source, GoblinData *data) {
     using namespace std;
-    if (data->flagRunV) {
+    if (data->flagRunA) {
         cout << "stopFeed !" << endl;
-        data->flagRunV = false;
+        data->flagRunA = false;
     }
 }
-
 //======================================================================================================================
-int main(int argc, char **argv){
+/// Process audio
+void codeThreadProcessA(GoblinData &data) {
     using namespace std;
-    cout << "VIDEO3: Two pipelines, with custom video processing in the middle" << endl;
+    for(;;) {
+        // We wait until ELF wants data, but only if ELF is already started
+        while (data.flagElfStarted && !data.flagRunA) {
+            cout << "(wait)" << endl;
+            this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
+        // Check for Goblin EOS
+        if (gst_app_sink_is_eos(GST_APP_SINK(data.goblinSinkA))) {
+            cout << "GOBLIN EOS !" << endl;
+            break;
+        }
+
+        // Pull the sample from Goblin appsink
+        GstSample *sample = gst_app_sink_pull_sample(GST_APP_SINK(data.goblinSinkA));
+        if (sample == nullptr) {
+            cout << "NO sample !" << endl;
+            break;
+        }
+
+        // Check if ELF is initialized
+        if (!data.flagElfStarted) {
+            // Use sample caps verbatim to ELF appsrc and re-negotiate
+            //            // Make a copy to be safe (probably not needed)
+            GstCaps *caps = gst_sample_get_caps(sample);
+            MY_ASSERT(caps != nullptr);
+            GstCaps *capsElf = gst_caps_copy(caps);
+
+            g_object_set(data.elfSrcA, "caps", capsElf, nullptr);
+            gst_caps_unref(capsElf);
+
+            // Start the elf pipeline
+            GstStateChangeReturn ret = gst_element_set_state(data.elfPipeline, GST_STATE_PLAYING);
+            MY_ASSERT(ret != GST_STATE_CHANGE_FAILURE);
+            data.flagElfStarted = true;
+        }
+
+        // Process sample
+        GstBuffer *bufferIn = gst_sample_get_buffer(sample);
+        GstMapInfo mapIn;
+        MY_ASSERT(gst_buffer_map(bufferIn, &mapIn, GST_MAP_READ));
+
+        // Create the output bufer and send it to elfSrc
+        // Here we simply copy the input buffer to the output
+        // If needed, some sound processing on the raw audio waveform can be put in the middle
+        int bufferSize = mapIn.size;
+        cout << "SAMPLE: bufferSize = " << mapIn.size << endl;
+        GstBuffer *bufferOut = gst_buffer_new_and_alloc(bufferSize);
+        GstMapInfo mapOut;
+        gst_buffer_map(bufferOut, &mapOut, GST_MAP_WRITE);
+        memcpy(mapOut.data, mapIn.data, bufferSize);
+        gst_buffer_unmap(bufferIn, &mapIn);
+        gst_buffer_unmap(bufferOut, &mapOut);
+        // Copy the input packet timestamp and duration
+        bufferOut->pts = bufferIn->pts;
+        bufferOut->duration = bufferIn->duration;
+        GstFlowReturn ret = gst_app_src_push_buffer(GST_APP_SRC(data.elfSrcA), bufferOut);
+
+        gst_sample_unref(sample);
+    }
+    gst_app_src_end_of_stream(GST_APP_SRC(data.elfSrcA));
+}
+//======================================================================================================================
+int main(int argc, char **argv) {
+    using namespace std;
+    cout << "AUDIO1: Two audio pipelines, with custom audio processing in the middle, no video" << endl;
 
     // Init gstreamer
     gst_init(&argc, &argv);
 
     if (argc != 2) {
-        cout << "Usage:\nvideo3 <video_file>" << endl;
+        cout << "Usage:\naudio1 <audio_file>" << endl;
         return 0;
     }
     string fileName(argv[1]);
@@ -236,41 +219,36 @@ int main(int argc, char **argv){
     // Our global data
     GoblinData data;
 
-    // Now we have two pipelines running simultaneously:
-    // GOBLIN (input) decodes a video file and sends data to appsink
-    // ELF (output) encodes data from an appsrc to a video file
-    // GStreamer can run as many pipelines as you wish (in different threads)
-
     // Set up GOBLIN (input) pipeline
+    // Here we force the int16 interleaved format, but do not specify the sample rate
     string pipeStrGoblin = "filesrc location=" + fileName +
-                     " ! decodebin ! videoconvert ! appsink name=goblin_sink max-buffers=2 sync=1 caps=video/x-raw,format=BGR";
+                           " ! decodebin ! audioconvert ! appsink name=goblin_sink max-buffers=2 sync=1 caps=audio/x-raw,format=S16LE,layout=interleaved";
     GError *err = nullptr;
     data.goblinPipeline = gst_parse_launch(pipeStrGoblin.c_str(), &err);
     checkErr(err);
     MY_ASSERT(data.goblinPipeline);
-    data.goblinSinkV = gst_bin_get_by_name(GST_BIN (data.goblinPipeline), "goblin_sink");
-    MY_ASSERT(data.goblinSinkV);
+    data.goblinSinkA = gst_bin_get_by_name(GST_BIN (data.goblinPipeline), "goblin_sink");
+    MY_ASSERT(data.goblinSinkA);
 
     // Set up ELF (output pipeline)
     // Note that appsrc does not have full caps yet as usual
-    string pipeStrElf = "appsrc name=elf_src format=time caps=video/x-raw,format=BGR ! videoconvert ! autovideosink sync=1";
+    // format=time is vital for audio for some reason
+    string pipeStrElf = "appsrc name=elf_src format=time caps=audio/x-raw,format=S16LE,layout=interleaved ! audioconvert ! audioresample ! autoaudiosink sync=1";
     data.elfPipeline = gst_parse_launch(pipeStrElf.c_str(), &err);
     checkErr(err);
     MY_ASSERT(data.elfPipeline);
-    data.elfSrcV = gst_bin_get_by_name(GST_BIN (data.elfPipeline), "elf_src");
-    MY_ASSERT(data.elfSrcV);
+    data.elfSrcA = gst_bin_get_by_name(GST_BIN (data.elfPipeline), "elf_src");
+    MY_ASSERT(data.elfSrcA);
     // Add calbacks like in video2
-    g_signal_connect(data.elfSrcV, "need-data", G_CALLBACK(startFeed), &data);
-    g_signal_connect(data.elfSrcV, "enough-data", G_CALLBACK(stopFeed), &data);
-
+    g_signal_connect(data.elfSrcA, "need-data", G_CALLBACK(startFeed), &data);
+    g_signal_connect(data.elfSrcA, "enough-data", G_CALLBACK(stopFeed), &data);
 
     // Play the Goblin pipeline only (Elf will start a bit later)
     MY_ASSERT(gst_element_set_state(data.goblinPipeline, GST_STATE_PLAYING));
 
-
-    // Video processing thread (from goblin appsink to elf appsrc)
-    thread threadProcessV([&data]{
-        codeThreadProcessV(data);
+    // Audio processing thread (from goblin appsink to elf appsrc)
+    thread threadProcessA([&data]{
+        codeThreadProcessA(data);
     });
     // Now we need two bus threads: one for each pipeline !
     thread threadBusGoblin([&data]{
@@ -281,7 +259,7 @@ int main(int argc, char **argv){
     });
 
     // Wait for threads
-    threadProcessV.join();
+    threadProcessA.join();
     threadBusGoblin.join();
     threadBusElf.join();
 

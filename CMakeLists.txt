@@ -35,3 +35,9 @@ target_link_libraries(video2 ${GST_LIBRARIES} ${OpenCV_LIBS})
 
 add_executable(video3 video3.cpp)
 target_link_libraries(video3 ${GST_LIBRARIES} ${OpenCV_LIBS})
+
+add_executable(audio1 audio1.cpp)
+target_link_libraries(audio1 ${GST_LIBRARIES})
+
+add_executable(av1 av1.cpp)
+target_link_libraries(av1 ${GST_LIBRARIES} ${OpenCV_LIBS})
