@@ -172,6 +172,7 @@ void codeThreadProcessV(GoblinData &data) {
 
         // Copy data from the sample to cv::Mat()
         GstBuffer *bufferIn = gst_sample_get_buffer(sample);
+        gst_sample_unref(sample);
         GstMapInfo mapIn;
         myAssert(gst_buffer_map(bufferIn, &mapIn, GST_MAP_READ));
         myAssert(mapIn.size == imW * imH * 3);
